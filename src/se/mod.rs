@@ -18,10 +18,24 @@ pub fn to_writer<W: Write, S: Serialize>(writer: W, value: &S) -> Result<(), DeE
     value.serialize(&mut serializer)
 }
 
+/// Serialize struct into a `Write`r
+pub fn to_writer_with_indent<W: Write, S: Serialize>(writer: W, value: &S, indent_char: u8, indent_size: usize) -> Result<(), DeError> {
+    let mut serializer = Serializer::with_root(Writer::new_with_indent(writer, indent_char, indent_size), None);
+    value.serialize(&mut serializer)
+}
+
 /// Serialize struct into a `String`
 pub fn to_string<S: Serialize>(value: &S) -> Result<String, DeError> {
     let mut writer = Vec::new();
     to_writer(&mut writer, value)?;
+    let s = String::from_utf8(writer).map_err(|e| crate::errors::Error::Utf8(e.utf8_error()))?;
+    Ok(s)
+}
+
+/// Serialize struct into a `String`
+pub fn to_string_with_indent<S: Serialize>(value: &S, indent_char: u8, indent_size: usize) -> Result<String, DeError> {
+    let mut writer = Vec::new();
+    to_writer_with_indent(&mut writer, value, indent_char, indent_size)?;
     let s = String::from_utf8(writer).map_err(|e| crate::errors::Error::Utf8(e.utf8_error()))?;
     Ok(s)
 }
@@ -98,6 +112,11 @@ impl<'r, W: Write> Serializer<'r, W> {
         value: P,
         escaped: bool,
     ) -> Result<(), DeError> {
+        if let Some(tag) = self.root_tag {
+            self.writer
+                .write_event(Event::Start(BytesStart::borrowed_name(tag.as_bytes())))?;
+        }
+
         let value = value.to_string().into_bytes();
         let event = if escaped {
             BytesText::from_escaped(value)
@@ -105,6 +124,12 @@ impl<'r, W: Write> Serializer<'r, W> {
             BytesText::from_plain(&value)
         };
         self.writer.write_event(Event::Text(event))?;
+
+        if let Some(tag) = self.root_tag {
+            self.writer
+                .write_event(Event::End(BytesEnd::borrowed(tag.as_bytes())))?;
+        }
+
         Ok(())
     }
 
@@ -240,7 +265,7 @@ impl<'r, 'w, W: Write> ser::Serializer for &'w mut Serializer<'r, W> {
         name: &'static str,
         value: &T,
     ) -> Result<Self::Ok, DeError> {
-        self.write_paired(self.root_tag.unwrap_or(name), value)
+        value.serialize(&mut *self)
     }
 
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -309,7 +334,7 @@ impl<'r, 'w, W: Write> ser::Serializer for &'w mut Serializer<'r, W> {
         name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, DeError> {
-        Ok(Struct::new(self, self.root_tag.unwrap_or(name)))
+        Ok(Struct::new(self, self.root_tag))
     }
 
     fn serialize_struct_variant(
@@ -319,7 +344,7 @@ impl<'r, 'w, W: Write> ser::Serializer for &'w mut Serializer<'r, W> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, DeError> {
-        Ok(Struct::new(self, variant))
+        Ok(Struct::new(self, Some(variant)))
     }
 }
 

@@ -60,7 +60,7 @@ use events::Event;
 pub struct Writer<W: Write> {
     /// underlying writer
     writer: W,
-    indent: Option<Indentation>,
+    pub(crate) indent: Option<Indentation>,
 }
 
 impl<W: Write> Writer<W> {
@@ -94,6 +94,18 @@ impl<W: Write> Writer<W> {
     pub fn write_event<'a, E: AsRef<Event<'a>>>(&mut self, event: E) -> Result<()> {
         let mut next_should_line_break = true;
         let result = match *event.as_ref() {
+            Event::IndentGlow => {
+                if let Some(i) = self.indent.as_mut() {
+                    i.grow();
+                }
+                Ok(())
+            }
+            Event::IndentShrink => {
+                if let Some(i) = self.indent.as_mut() {
+                    i.shrink();
+                }
+                Ok(())
+            }
             Event::Start(ref e) => {
                 let result = self.write_wrapped(b"<", e, b">");
                 if let Some(i) = self.indent.as_mut() {
@@ -173,7 +185,7 @@ impl<W: Write> Writer<W> {
 }
 
 #[derive(Clone)]
-struct Indentation {
+pub(crate) struct Indentation {
     should_line_break: bool,
     indent_char: u8,
     indent_size: usize,

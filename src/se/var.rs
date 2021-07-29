@@ -56,17 +56,26 @@ where
         key: &K,
         value: &V,
     ) -> Result<(), DeError> {
-        // TODO: Is it possible to ensure our key is never a composite type?
-        // Anything which isn't a "primitive" would lead to malformed XML here...
-        write!(self.parent.writer.inner(), "<").map_err(Error::Io)?;
-        key.serialize(&mut *self.parent)?;
-        write!(self.parent.writer.inner(), ">").map_err(Error::Io)?;
+        let mut buffer = Vec::new();
+        let mut writer = Writer::new(&mut buffer);
+        if let Some(indent) = &self.parent.writer.indent {
+            writer.indent = Some(indent.clone());
+        }
+        let mut serializer = Serializer::with_root(writer, None);
+        key.serialize(&mut serializer)?;
 
+        let tag = BytesStart::borrowed_name(&buffer);
+        self.parent
+            .writer
+            .write_event(Event::Start(tag.to_borrowed()))?;
+
+        let root = self.parent.root_tag.take();
         value.serialize(&mut *self.parent)?;
+        self.parent.root_tag = root;
 
-        write!(self.parent.writer.inner(), "</").map_err(Error::Io)?;
-        key.serialize(&mut *self.parent)?;
-        write!(self.parent.writer.inner(), ">").map_err(Error::Io)?;
+        self.parent
+            .writer
+            .write_event(Event::End(tag.to_end()))?;
         Ok(())
     }
 }
@@ -79,11 +88,12 @@ where
     parent: &'w mut Serializer<'r, W>,
     /// Buffer for holding fields, serialized as attributes. Doesn't allocate
     /// if there are no fields represented as attributes
-    attrs: BytesStart<'w>,
+    attrs: Option<BytesStart<'w>>,
     /// Buffer for holding fields, serialized as elements
     children: Vec<u8>,
     /// Buffer for serializing one field. Cleared after serialize each field
     buffer: Vec<u8>,
+    begun: bool,
 }
 
 impl<'r, 'w, W> Struct<'r, 'w, W>
@@ -91,13 +101,13 @@ where
     W: 'w + Write,
 {
     /// Create a new `Struct`
-    pub fn new(parent: &'w mut Serializer<'r, W>, name: &'r str) -> Self {
-        let name = name.as_bytes();
+    pub fn new(parent: &'w mut Serializer<'r, W>, name: Option<&'r str>) -> Self {
         Struct {
             parent,
-            attrs: BytesStart::borrowed_name(name),
+            attrs: name.map(|name| BytesStart::borrowed_name(name.as_bytes())),
             children: Vec::new(),
             buffer: Vec::new(),
+            begun: false,
         }
     }
 }
@@ -114,18 +124,44 @@ where
         key: &'static str,
         value: &T,
     ) -> Result<(), DeError> {
+        if !self.begun {
+            self.begun = true;
+            self.parent.writer.write_event(Event::IndentGlow)?;
+        }
+
+        let (key, is_attr, is_name) = match key.strip_suffix(" $attr") {
+            Some(key) => (key, true, false),
+            None => {
+                match key.strip_suffix(" $name") {
+                    Some(key) => (key, false, true),
+                    None => (key, false, false)
+                }
+            },
+        };
+
+        if is_name {
+            if let Some(attrs) = &mut self.attrs {
+                attrs.set_name(key.as_bytes());
+            } else {
+                self.attrs = Some(BytesStart::borrowed_name(key.as_bytes()))
+            }
+            return Ok(());
+        }
+
         // TODO: Inherit indentation state from self.parent.writer
-        let writer = Writer::new(&mut self.buffer);
-        let mut serializer = Serializer::with_root(writer, Some(key));
+        let mut writer = Writer::new(&mut self.buffer);
+        if let Some(indent) = &self.parent.writer.indent {
+            writer.indent = Some(indent.clone());
+        }
+        let mut serializer = Serializer::with_root(writer, if !is_attr { Some(key) } else { None });
         value.serialize(&mut serializer)?;
 
         if !self.buffer.is_empty() {
-            if self.buffer[0] == b'<' || key == "$value" {
+            if !is_attr {
                 // Drains buffer, moves it to children
                 self.children.append(&mut self.buffer);
-            } else {
-                self.attrs
-                    .push_attribute((key.as_bytes(), self.buffer.as_ref()));
+            } else if let Some(attrs) = &mut self.attrs {
+                attrs.push_attribute((key.as_bytes(), self.buffer.as_ref()));
                 self.buffer.clear();
             }
         }
@@ -134,16 +170,24 @@ where
     }
 
     fn end(self) -> Result<Self::Ok, DeError> {
+        self.parent.writer.write_event(Event::IndentShrink)?;
+
         if self.children.is_empty() {
-            self.parent.writer.write_event(Event::Empty(self.attrs))?;
+            if let Some(attrs) = self.attrs {
+                self.parent.writer.write_event(Event::Empty(attrs))?;
+            }
         } else {
-            self.parent
-                .writer
-                .write_event(Event::Start(self.attrs.to_borrowed()))?;
+            if let Some(attrs) = &self.attrs {
+                self.parent
+                    .writer
+                    .write_event(Event::Start(attrs.to_borrowed()))?;
+            }
             self.parent.writer.write(&self.children)?;
-            self.parent
-                .writer
-                .write_event(Event::End(self.attrs.to_end()))?;
+            if let Some(attrs) = &self.attrs {
+                self.parent
+                    .writer
+                    .write_event(Event::End(attrs.to_end()))?;
+            }
         }
         Ok(())
     }
@@ -241,9 +285,9 @@ where
     where
         T: Serialize,
     {
-        write!(self.parent.writer.inner(), "<{}>", self.name).map_err(Error::Io)?;
+        let root = self.parent.root_tag.replace(self.name);
         value.serialize(&mut *self.parent)?;
-        write!(self.parent.writer.inner(), "</{}>", self.name).map_err(Error::Io)?;
+        self.parent.root_tag = root;
         Ok(())
     }
 

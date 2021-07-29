@@ -807,6 +807,10 @@ impl<'a> std::fmt::Debug for BytesText<'a> {
 /// [`Reader::read_event`]: ../reader/struct.Reader.html#method.read_event
 #[derive(Clone, Debug)]
 pub enum Event<'a> {
+    /// Indent glow.
+    IndentGlow,
+    /// Indent shrink.
+    IndentShrink,
     /// Start tag (with attributes) `<tag attr="value">`.
     Start(BytesStart<'a>),
     /// End tag `</tag>`.
@@ -834,6 +838,8 @@ impl<'a> Event<'a> {
     /// buffer used when reading but incurring a new, seperate allocation.
     pub fn into_owned(self) -> Event<'static> {
         match self {
+            Event::IndentGlow => Event::IndentGlow,
+            Event::IndentShrink => Event::IndentShrink,
             Event::Start(e) => Event::Start(e.into_owned()),
             Event::End(e) => Event::End(e.into_owned()),
             Event::Empty(e) => Event::Empty(e.into_owned()),
@@ -880,6 +886,8 @@ impl<'a> Deref for Event<'a> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match *self {
+            Event::IndentGlow => &[],
+            Event::IndentShrink => &[],
             Event::Start(ref e) | Event::Empty(ref e) => &*e,
             Event::End(ref e) => &*e,
             Event::Text(ref e) => &*e,
